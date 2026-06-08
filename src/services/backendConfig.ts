@@ -23,6 +23,9 @@ export function getBackendServerUrl(): string {
 
   // 生产模式：使用配置的后端URL
   if (typeof BACKEND_BASE_URL === 'string') {
+    if (BACKEND_BASE_URL === '__SAME_ORIGIN__') {
+      return window.location.origin;
+    }
     return normalizeBackendUrl(BACKEND_BASE_URL);
   }
   return '';

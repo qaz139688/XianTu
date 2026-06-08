@@ -2,6 +2,20 @@
 import { toast } from '../utils/toast';
 import { buildBackendUrl, isBackendConfigured } from './backendConfig';
 
+export class HttpRequestError extends Error {
+  status: number;
+  payload: unknown;
+  code?: string;
+
+  constructor(message: string, status: number, payload: unknown, code?: string) {
+    super(message);
+    this.name = 'HttpRequestError';
+    this.status = status;
+    this.payload = payload;
+    this.code = code;
+  }
+}
+
 const normalizeRequestErrorMessage = (message: string): string => {
   const trimmed = message.trim();
   if (!trimmed) {
@@ -52,6 +66,16 @@ const extractErrorMessageFromBody = (body: unknown): string | null => {
   if ('detail' in record) return formatFastApiErrorDetail(record.detail);
   if (typeof record.message === 'string') return record.message;
   return JSON.stringify(record);
+};
+
+const extractErrorCodeFromBody = (body: unknown): string | undefined => {
+  if (!body || typeof body !== 'object') return undefined;
+  const record = body as Record<string, unknown>;
+  const detail = record.detail;
+  if (detail && typeof detail === 'object' && typeof (detail as Record<string, unknown>).code === 'string') {
+    return (detail as Record<string, unknown>).code as string;
+  }
+  return typeof record.code === 'string' ? record.code : undefined;
 };
 
 const shouldSkipAuthRedirect = (path: string): boolean =>
@@ -107,8 +131,12 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
 
     if (!response.ok) {
       let errorMessage = `服务端错误 ${response.status}`;
+      let errorPayload: unknown = rawText;
+      let errorCode: string | undefined;
       try {
         const errorJson = JSON.parse(rawText) as unknown;
+        errorPayload = errorJson;
+        errorCode = extractErrorCodeFromBody(errorJson);
         errorMessage = extractErrorMessageFromBody(errorJson) || errorMessage;
       } catch (_e) {
         // 如果响应不是JSON，就使用原始文本的前100个字符作为错误信息
@@ -119,7 +147,7 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
 
       // 登录相关的401错误不自动弹toast，让调用方处理
       if (shouldSkipAuthRedirect(url)) {
-        throw new Error(errorMessage);
+        throw new HttpRequestError(errorMessage, response.status, errorPayload, errorCode);
       }
 
       if (response.status === 401) {
@@ -132,7 +160,7 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
         didToast = true;
       }
 
-      throw new Error(errorMessage);
+      throw new HttpRequestError(errorMessage, response.status, errorPayload, errorCode);
     }
 
     try {
@@ -141,6 +169,13 @@ export async function request<T>(url: string, options: RequestInit = {}): Promis
       throw new Error('解析服务端响应失败，返回的不是有效的JSON格式。');
     }
   } catch (error) {
+    if (error instanceof HttpRequestError) {
+      if (!didToast && !shouldSkipAuthRedirect(url)) {
+        toast.error(error.message);
+      }
+      throw error;
+    }
+
     const errorMessage = normalizeRequestErrorMessage(
       error instanceof Error
         ? error.message
@@ -176,5 +211,4 @@ request.put = <T>(url: string, data?: unknown, options: Omit<RequestInit, 'metho
 
 request.delete = <T>(url: string, options: Omit<RequestInit, 'method'> = {}) =>
   request<T>(url, { ...options, method: 'DELETE' });
-
 

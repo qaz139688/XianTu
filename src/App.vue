@@ -250,7 +250,6 @@ import { toast } from './utils/toast';
 import { getTavernHelper } from './utils/tavern'; // 添加导入
 import { fetchBackendVersion, isBackendConfigured } from '@/services/backendConfig';
 import { heartbeatPresenceSilent } from '@/services/presence';
-import { endTravelBeacon } from '@/services/onlineTravel';
 import { getFullscreenElement, requestFullscreen, exitFullscreen, explainFullscreenError } from './utils/fullscreen';
 import type { CharacterBaseInfo } from '@/types/game';
 import type { CharacterCreationPayload, Talent } from '@/types';
@@ -742,26 +741,11 @@ onMounted(async () => {
     }
   }, 5 * 60 * 1000); // 5分钟
 
-  // 6. 页面关闭时尝试结束穿越会话
-  const handleBeforeUnload = () => {
-    // 检查是否有活跃的穿越会话
-    const onlineState = gameStateStore.onlineState as any;
-    const sessionId = onlineState?.房间ID;
-    if (sessionId && characterStore.activeCharacterProfile?.模式 === '联机') {
-      // 尝试结束穿越会话
-      endTravelBeacon(Number(sessionId));
-      console.log('[App] beforeunload: 尝试结束穿越会话', sessionId);
-    }
-  };
-  window.addEventListener('beforeunload', handleBeforeUnload);
-
   // 统一的清理逻辑
   onUnmounted(() => {
     stopOnlineHeartbeat();
     // 清理定时保存定时器
     clearInterval(saveInterval);
-    // 清理 beforeunload 监听
-    window.removeEventListener('beforeunload', handleBeforeUnload);
     // 清理父窗口resize监听
     try {
       if (targetParentWindow) {

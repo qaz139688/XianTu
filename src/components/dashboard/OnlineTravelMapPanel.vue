@@ -153,7 +153,11 @@ const refreshAll = async () => {
       return;
     }
     session.value = active;
-    graph.value = await getMapGraph(active.target_world_instance_id, active.entry_map_id, active.session_id);
+    graph.value = await getMapGraph(
+      active.target_world_instance_id,
+      active.current_map_id ?? active.entry_map_id,
+      active.session_id
+    );
   } catch (e: any) {
     errorText.value = e?.message || '加载世界信息失败';
   } finally {

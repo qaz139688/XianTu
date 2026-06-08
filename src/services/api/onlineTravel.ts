@@ -9,11 +9,21 @@ export type TravelProfile = {
 
 export type TravelStartResponse = {
   session_id: number;
+  state: 'active' | 'ended' | 'evicted' | 'rejected';
+  end_reason: 'normal' | 'owner_online' | 'kicked' | null;
   target_world_instance_id: number;
   entry_map_id: number;
   entry_poi_id: number;
+  current_map_id: number;
+  current_poi_id: number;
   return_anchor: Record<string, unknown>;
   travel_points_left: number;
+  overlay_base?: {
+    character_version: number;
+    world_revision: number;
+  } | null;
+  owner_online?: boolean;
+  owner_last_heartbeat_at?: string | null;
   // 目标世界主人的离线代理提示词
   owner_offline_agent_prompt?: string | null;
   // 目标世界主人的角色信息（用于AI扮演）
@@ -27,11 +37,15 @@ export type TravelStartResponse = {
 
 export type TravelSessionStatusResponse = {
   session_id: number;
-  state: 'active' | 'ended' | 'settled';
+  state: 'active' | 'ended' | 'evicted' | 'rejected';
   end_reason: 'normal' | 'owner_online' | 'kicked' | null;
   target_world_instance_id: number;
   entry_map_id: number;
   entry_poi_id: number;
+  current_map_id: number;
+  current_poi_id: number;
+  owner_online?: boolean;
+  owner_last_heartbeat_at?: string | null;
 };
 
 export type MapGraphResponse = {
@@ -117,6 +131,16 @@ export async function endTravel(session_id: number): Promise<{ success: boolean;
   return request.post<{ success: boolean; message: string }>('/api/v1/travel/end', { session_id });
 }
 
+export type TravelTerminalAckResponse = {
+  success: boolean;
+  cleared: boolean;
+  reason: 'acknowledged' | 'already_cleared' | 'superseded_by_new_active' | string;
+};
+
+export async function ackTerminalTravel(session_id: number): Promise<TravelTerminalAckResponse> {
+  return request.post<TravelTerminalAckResponse>('/api/v1/travel/ack-terminal', { session_id });
+}
+
 /**
  * 使用 keepalive fetch 结束穿越会话（用于页面关闭时）
  * keepalive 在页面卸载时比普通 fetch 更可靠，且支持 Authorization header
@@ -186,7 +210,7 @@ export type TravelSessionEvent = {
 
 export type TravelSessionLogsResponse = {
   session_id: number;
-  state: 'active' | 'ended' | 'settled' | string;
+  state: 'active' | 'ended' | 'evicted' | 'rejected' | string;
   end_reason: 'normal' | 'owner_online' | 'kicked' | null;
   target_world_instance_id: number;
   entry_map_id: number;
@@ -199,6 +223,12 @@ export type WorldActionResponse = {
   message: string;
   new_map_id?: number;
   new_poi_id?: number;
+  applied_overlay_id?: number;
+  new_world_revision?: number;
+  overlay_base?: {
+    character_version: number;
+    world_revision: number;
+  } | null;
 };
 
 export async function getTravelSessionLogs(session_id: number): Promise<TravelSessionLogsResponse> {
@@ -247,7 +277,9 @@ export async function overwriteWorldMap(
   world_instance_id: number,
   locations: unknown[],
   session_id?: number,
-  map_id?: number
+  map_id?: number,
+  base_character_version?: number,
+  base_world_revision?: number
 ): Promise<WorldActionResponse> {
   return request.post(`/api/v1/worlds/instance/${world_instance_id}/action`, {
     session_id,
@@ -255,6 +287,8 @@ export async function overwriteWorldMap(
     intent: {
       locations,
       map_id,
+      base_character_version,
+      base_world_revision,
     },
   });
 }

@@ -1,0 +1,27 @@
+services:
+  xiantu-backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: xiantu-backend
+    restart: unless-stopped
+    environment:
+      XIANTU_DB_PATH: /data/xiantu.db
+      XIANTU_SECRET_KEY: ${XIANTU_SECRET_KEY:?Set XIANTU_SECRET_KEY in .env before starting the self-hosted backend}
+    volumes:
+      - xiantu-data:/data
+
+  xiantu-web:
+    image: nginx:alpine
+    container_name: xiantu-web
+    restart: unless-stopped
+    depends_on:
+      - xiantu-backend
+    ports:
+      - "80:80"
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  xiantu-data:

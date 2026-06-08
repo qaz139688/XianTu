@@ -22,7 +22,7 @@ export default (env, argv) => {
     entry: './src/main.ts',
     output: {
       path: path.resolve(__dirname, 'dist'),
-      filename: (isWatch || isSingleFile) ? 'inline.js' : 'XianTu.js',
+      filename: (isWatch || isSingleFile) ? 'inline.js' : 'XianTu.[contenthash:8].js',
       clean: true,
       publicPath: (isProduction || isWatch) ? './' : '/', // dev server 用 /，打包用 ./
     },
@@ -109,7 +109,7 @@ export default (env, argv) => {
         __VUE_PROD_DEVTOOLS__: JSON.stringify(false),
         __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: JSON.stringify(false),
         'APP_VERSION': JSON.stringify(packageJson.version),
-        'BACKEND_BASE_URL': JSON.stringify('https://back.ddct.top') //后端路径
+        'BACKEND_BASE_URL': JSON.stringify('__SAME_ORIGIN__')
       }),
       new HtmlWebpackPlugin({
         template: './index.html',
@@ -143,6 +143,17 @@ export default (env, argv) => {
           });
         }
       } : null,
+      {
+        apply: (compiler) => {
+          compiler.hooks.afterEmit.tap('CopyIntroPage', () => {
+            const introSource = path.join(__dirname, '游戏介绍.html');
+            const introTarget = path.join(__dirname, 'dist', '游戏介绍.html');
+            if (fs.existsSync(introSource)) {
+              fs.copyFileSync(introSource, introTarget);
+            }
+          });
+        }
+      },
       // !isProduction && !isWatch ? new TavernLiveReloadPlugin({ port: 6620 }) : null,
     ].filter(Boolean),
     devServer: {
@@ -156,7 +167,7 @@ export default (env, argv) => {
       proxy: [
         {
           context: ['/api'],
-          target: 'https://back.ddct.top',
+          target: 'http://127.0.0.1:12345',
           changeOrigin: true,
           secure: false,
           on: {

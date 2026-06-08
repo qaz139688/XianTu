@@ -1,6 +1,5 @@
 {
-  "name": "XianTu",
-  "version": "",
+  "name": "xiantu",
   "description": "AI驱动的沉浸式修仙文字冒险游戏（SillyTavern / 自定义API，Vue3 + TypeScript）",
   "private": true,
   "type": "module",
@@ -70,5 +69,12 @@
     "webpack-cli": "^6.0.1",
     "webpack-dev-server": "^5.2.2",
     "yaml": "^2.8.2"
-  }
+  },
+  "version": "1.0.0",
+  "main": ".eslintrc.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": ""
 }

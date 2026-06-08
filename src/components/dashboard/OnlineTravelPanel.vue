@@ -385,6 +385,7 @@ const tabs = [
 ];
 const activeTab = ref('travel');
 import {
+  ackTerminalTravel,
   endTravel,
   getActiveTravelSession,
   getMapGraph,
@@ -449,11 +450,73 @@ const hasMore = ref(true);
 const searchDebounceTimer = ref<number | null>(null);
 const sessionPollTimer = ref<number | null>(null);
 const SESSION_POLL_INTERVAL = 30000; // 30秒轮询一次
+const TERMINAL_TRAVEL_STATES = new Set(['ended', 'evicted', 'rejected']);
 
 // 🔥 新增：心跳状态
 const heartbeatStatus = ref<'normal' | 'warning' | 'error'>('normal');
 const lastHeartbeatTime = ref<Date | null>(null);
 const heartbeatMessage = ref('');
+
+const isTerminalTravelState = (state?: string | null) => !!state && TERMINAL_TRAVEL_STATES.has(state);
+
+const getSessionMapId = (activeSession: TravelStartResponse | TravelSessionStatusResponse) =>
+  activeSession.current_map_id ?? activeSession.entry_map_id;
+
+const getSessionPoiId = (activeSession: TravelStartResponse | TravelSessionStatusResponse) =>
+  activeSession.current_poi_id ?? activeSession.entry_poi_id;
+
+const extractConflictOverlayBase = (error: unknown) => {
+  const payload = (error as any)?.payload;
+  const body = payload && typeof payload === 'object' && 'detail' in payload
+    ? (payload as any).detail
+    : payload;
+  if ((error as any)?.code !== 'WORLD_REVISION_CONFLICT' && body?.code !== 'WORLD_REVISION_CONFLICT') {
+    return null;
+  }
+  const characterVersion = Number(body?.current_character_version);
+  const worldRevision = Number(body?.current_world_revision);
+  if (!Number.isFinite(characterVersion) || !Number.isFinite(worldRevision)) {
+    return null;
+  }
+  return {
+    character_version: characterVersion,
+    world_revision: worldRevision,
+  };
+};
+
+const updateSessionCursor = async (status: TravelSessionStatusResponse) => {
+  if (!session.value || session.value.session_id !== status.session_id) return;
+  const nextMapId = getSessionMapId(status);
+  const nextPoiId = getSessionPoiId(status);
+  const hasCursorChanged =
+    session.value.current_map_id !== nextMapId ||
+    session.value.current_poi_id !== nextPoiId;
+  session.value = {
+    ...session.value,
+    state: status.state,
+    end_reason: status.end_reason,
+    current_map_id: nextMapId,
+    current_poi_id: nextPoiId,
+    owner_online: status.owner_online,
+    owner_last_heartbeat_at: status.owner_last_heartbeat_at,
+  };
+  const currentOnline = gameStateStore.onlineState as any;
+  if (currentOnline?.模式 === '联机' && currentOnline?.房间ID === String(status.session_id)) {
+    gameStateStore.updateState('onlineState', {
+      ...currentOnline,
+      当前地图ID: nextMapId,
+      当前POI: nextPoiId,
+      穿越目标: {
+        ...(currentOnline.穿越目标 ?? {}),
+        当前地图ID: nextMapId,
+        当前POI: nextPoiId,
+      },
+    });
+    if (hasCursorChanged) {
+      await characterStore.saveCurrentGame();
+    }
+  }
+};
 
 const handleTravelNotePosted = (event: Event) => {
   const detail = (event as CustomEvent)?.detail as any;
@@ -671,6 +734,25 @@ const clearFullBackup = async () => {
   }
 };
 
+const clearLocalOnlineTravelState = async (options: { persist?: boolean; reason?: string } = {}) => {
+  if (gameStateStore.onlineState && (gameStateStore.onlineState as any).房间ID) {
+    const currentOnline = gameStateStore.onlineState as any;
+    console.log('[联机穿越] 清理联机状态:', {
+      房间ID: currentOnline.房间ID,
+      模式: currentOnline.模式,
+      reason: options.reason,
+    });
+
+    gameStateStore.updateState('onlineState', {
+      ...(gameStateStore.onlineState || {}),
+      房间ID: null,
+      穿越目标: null,
+    });
+    if (options.persist) await characterStore.saveCurrentGame();
+    console.log('[联机穿越] 联机状态已清理');
+  }
+};
+
 const storeWorldBackup = (force: boolean = false) => {
   const key = getBackupKey();
   if (!force && localStorage.getItem(key)) {
@@ -712,6 +794,11 @@ const restoreWorldBackup = async (options: { persist?: boolean } = {}) => {
         current: currentCharId,
         backup: fullBackup.characterId,
       });
+      await clearFullBackup();
+      localStorage.removeItem(getBackupKey());
+      localStorage.removeItem(`${onlineBackupPrefix}latest`);
+      await clearLocalOnlineTravelState({ persist: options.persist, reason: 'full_backup_character_mismatch' });
+      return false;
     } else {
       // 恢复完整存档到gameStateStore
       await gameStateStore.loadFromSaveData(fullBackup.saveData);
@@ -745,11 +832,18 @@ const restoreWorldBackup = async (options: { persist?: boolean } = {}) => {
     const currentCharId = characterStore.rootState?.当前激活存档?.角色ID;
     const backupCharId = (backup as any).characterId;
     if (backupCharId && currentCharId && backupCharId !== currentCharId) {
-      console.warn('[联机穿越] 备份角色ID不匹配，但仍然恢复', {
+      console.warn('[联机穿越] 备份角色ID不匹配，跳过部分恢复', {
         current: currentCharId,
         backup: backupCharId,
       });
-      toast.warning(t('备份角色ID不匹配，可能存在数据不一致'));
+      toast.warning(t('备份角色ID不匹配，已跳过恢复'));
+      if (backup.backupKey) {
+        localStorage.removeItem(backup.backupKey);
+      }
+      localStorage.removeItem(getBackupKey());
+      localStorage.removeItem(`${onlineBackupPrefix}latest`);
+      await clearLocalOnlineTravelState({ persist: options.persist, reason: 'backup_character_mismatch' });
+      return false;
     }
 
     if (backup.worldInfo) gameStateStore.updateState('worldInfo', backup.worldInfo);
@@ -771,21 +865,7 @@ const restoreWorldBackup = async (options: { persist?: boolean } = {}) => {
 
   console.warn('[联机穿越] 未找到任何世界备份，尝试清理联机状态');
   // 如果没有备份，至少清理联机状态
-  if (gameStateStore.onlineState && (gameStateStore.onlineState as any).房间ID) {
-    const currentOnline = gameStateStore.onlineState as any;
-    console.log('[联机穿越] 清理联机状态:', {
-      房间ID: currentOnline.房间ID,
-      模式: currentOnline.模式,
-    });
-
-    gameStateStore.updateState('onlineState', {
-      ...(gameStateStore.onlineState || {}),
-      房间ID: null,
-      穿越目标: null,
-    });
-    if (options.persist) await characterStore.saveCurrentGame();
-    console.log('[联机穿越] 联机状态已清理');
-  }
+  await clearLocalOnlineTravelState({ persist: options.persist, reason: 'missing_backup' });
   return false;
 };
 
@@ -886,16 +966,44 @@ const syncMapOverwrite = async (context: string) => {
 
   const locations = buildMapOverwriteLocations();
   if (locations.length === 0) return;
+  const overlayBase = onlineTarget?.overlay_base ?? session.value.overlay_base ?? null;
 
   try {
-    await overwriteWorldMap(
+    const res = await overwriteWorldMap(
       session.value.target_world_instance_id,
       locations,
       session.value.session_id,
-      graph.value?.map_id ?? session.value.entry_map_id
+      graph.value?.map_id ?? getSessionMapId(session.value),
+      overlayBase?.character_version,
+      overlayBase?.world_revision
     );
+    if (res.overlay_base) {
+      const currentOnline = gameStateStore.onlineState ?? {};
+      gameStateStore.updateState('onlineState', {
+        ...currentOnline,
+        穿越目标: {
+          ...((currentOnline as any).穿越目标 ?? {}),
+          overlay_base: res.overlay_base,
+        },
+      });
+      session.value = { ...session.value, overlay_base: res.overlay_base };
+    }
     console.log(`[联机穿越] 已同步地图覆盖 (${context})`, { count: locations.length });
   } catch (error) {
+    const conflictBase = extractConflictOverlayBase(error);
+    if (conflictBase) {
+      const currentOnline = gameStateStore.onlineState ?? {};
+      gameStateStore.updateState('onlineState', {
+        ...currentOnline,
+        穿越目标: {
+          ...((currentOnline as any).穿越目标 ?? {}),
+          overlay_base: conflictBase,
+        },
+      });
+      session.value = { ...session.value, overlay_base: conflictBase };
+      console.warn(`[联机穿越] 地图覆盖版本冲突，已刷新写入基线 (${context})`, conflictBase);
+      return;
+    }
     console.warn(`[联机穿越] 同步地图覆盖失败 (${context})`, error);
   }
 };
@@ -975,12 +1083,27 @@ const syncTravelState = async (
     ...currentOnline,
     模式: '联机',
     房间ID: String(activeSession.session_id),
+    当前地图ID: getSessionMapId(activeSession),
+    当前POI: getSessionPoiId(activeSession),
     只读路径: (currentOnline as any).只读路径 ?? ['世界'],
     穿越目标: {
       ...((currentOnline as any).穿越目标 ?? {}),
       世界ID: activeSession.target_world_instance_id,
+      当前地图ID: getSessionMapId(activeSession),
+      当前POI: getSessionPoiId(activeSession),
       主人用户名: snapshot?.owner_username ?? selectedWorld.value?.owner_username ?? null,
       允许地图覆盖: allowMapOverwrite,
+      离线代理提示词:
+        activeSession.owner_offline_agent_prompt ??
+        (currentOnline as any)?.穿越目标?.离线代理提示词 ??
+        null,
+      角色信息:
+        activeSession.owner_character_info ??
+        (currentOnline as any)?.穿越目标?.角色信息 ??
+        null,
+      overlay_base: activeSession.overlay_base ?? (currentOnline as any)?.穿越目标?.overlay_base ?? null,
+      世界主人在线: activeSession.owner_online ?? null,
+      世界主人最后心跳: activeSession.owner_last_heartbeat_at ?? null,
       世界主人位置: ownerLocation,
       世界主人档案: (() => {
         const base = mapGraph.owner_base_info ?? snapshot?.owner_base_info;
@@ -1090,7 +1213,7 @@ const refreshGraph = async (isInitialTravel: boolean = false) => {
     graph.value = null;
     return;
   }
-  graph.value = await getMapGraph(session.value.target_world_instance_id, session.value.entry_map_id, session.value.session_id);
+  graph.value = await getMapGraph(session.value.target_world_instance_id, getSessionMapId(session.value), session.value.session_id);
   travelSnapshot.value = null;
   try {
     travelSnapshot.value = await getTravelWorldSnapshot(session.value.session_id);
@@ -1102,10 +1225,92 @@ const refreshGraph = async (isInitialTravel: boolean = false) => {
   }
 };
 
+const handleTerminalTravelSession = async (
+  terminalSession: Pick<TravelSessionStatusResponse, 'session_id' | 'state' | 'end_reason'>,
+  options: { loadLogs?: boolean; showToast?: boolean; fallbackContent?: string } = {}
+) => {
+  const endedSessionId = terminalSession.session_id;
+  const wasEvicted = terminalSession.state === 'evicted' || terminalSession.end_reason === 'owner_online' || terminalSession.end_reason === 'kicked';
+
+  stopSessionPolling();
+  session.value = null;
+  graph.value = null;
+  travelSnapshot.value = null;
+
+  try {
+    await ackTerminalTravel(endedSessionId);
+  } catch (error) {
+    console.warn('[联机穿越] 终态 ack 失败:', error);
+  }
+
+  await restoreWorldBackup({ persist: true });
+
+  let returnContent = options.fallbackContent ?? '';
+  if (!returnContent) {
+    if (wasEvicted) {
+      if (terminalSession.end_reason === 'owner_online') {
+        returnContent = `【强制驱逐】你突然感到一股强大的排斥力量！` +
+          `世界主人已经上线，这个世界的真正主人回归了。` +
+          `虚空裂隙被强行撕开，你被一股不可抗拒的力量推出了这个世界。` +
+          `\n\n当你回过神来，发现自己已经回到了自己的世界。`;
+      } else {
+        returnContent = `【强制驱逐】你突然感到一股强大的排斥力量！` +
+          `世界主人发现了你的存在，决定将你驱逐出境。` +
+          `虚空裂隙被强行撕开，你被一股不可抗拒的力量推出了这个世界。` +
+          `\n\n当你回过神来，发现自己已经回到了自己的世界。`;
+      }
+    } else if (terminalSession.state === 'rejected') {
+      returnContent = `【穿越中断】这次联机穿越已经失效，虚空裂隙将你拉回了自己的世界。` +
+        `当你回过神来，发现自己已经回到了熟悉的地方。`;
+    } else {
+      returnContent = `【穿越结束】虚空裂隙再次出现，将你从异世界拉回。` +
+        `当你睁开眼睛时，发现自己已经回到了熟悉的世界。` +
+        `周围的一切都如你离开时一样，仿佛时间在你离开期间被冻结了。`;
+    }
+  }
+
+  const returnMessage = {
+    type: 'system' as const,
+    content: returnContent,
+    time: new Date().toISOString(),
+    actionOptions: ['查看自身状态', '回忆穿越经历', '继续当前活动'],
+  };
+  if (gameStateStore.narrativeHistory) {
+    gameStateStore.narrativeHistory.push(returnMessage);
+  }
+
+  gameStateStore.addToShortTermMemory(
+    `你的联机穿越结束了，已返回自己的世界。` +
+    `原世界在你离开期间处于时间冻结状态，一切如你离开时一样。`
+  );
+
+  await characterStore.saveCurrentGame();
+
+  await refreshReports();
+  if (options.loadLogs ?? true) {
+    await loadSessionLogs(endedSessionId);
+    activeTab.value = 'logs';
+  }
+
+  if (options.showToast ?? true) {
+    if (wasEvicted) {
+      toast.warning(terminalSession.end_reason === 'owner_online' ? t('世界主人已上线，你被驱逐出了该世界') : t('你已被驱逐出该世界'));
+    } else if (terminalSession.state === 'rejected') {
+      toast.warning(t('穿越会话已失效'));
+    } else {
+      toast.warning(t('穿越会话已结束'));
+    }
+  }
+};
+
 const restoreActiveSession = async () => {
   try {
     const activeSession = await getActiveTravelSession();
     if (activeSession) {
+      if (isTerminalTravelState(activeSession.state)) {
+        await handleTerminalTravelSession(activeSession);
+        return;
+      }
       session.value = activeSession;
       await refreshGraph();
       startSessionPolling(); // 启动轮询
@@ -1132,96 +1337,33 @@ const checkSessionStatus = async () => {
     heartbeatStatus.value = 'normal';
     heartbeatMessage.value = '通信正常';
 
-    if (status.state !== 'active') {
-      // 会话已结束
-      const wasEvicted = status.end_reason === 'owner_online' || status.end_reason === 'kicked';
-      const endedSessionId = session.value.session_id;
-
-      stopSessionPolling();
-      session.value = null;
-      graph.value = null;
-      await restoreWorldBackup({ persist: true });
-
-      // 添加返回叙事消息
-      let returnContent = '';
-      if (wasEvicted) {
-        if (status.end_reason === 'owner_online') {
-          returnContent = `【强制驱逐】你突然感到一股强大的排斥力量！` +
-            `世界主人已经上线，这个世界的真正主人回归了。` +
-            `虚空裂隙被强行撕开，你被一股不可抗拒的力量推出了这个世界。` +
-            `\n\n当你回过神来，发现自己已经回到了自己的世界。`;
-        } else {
-          returnContent = `【强制驱逐】你突然感到一股强大的排斥力量！` +
-            `世界主人发现了你的存在，决定将你驱逐出境。` +
-            `虚空裂隙被强行撕开，你被一股不可抗拒的力量推出了这个世界。` +
-            `\n\n当你回过神来，发现自己已经回到了自己的世界。`;
-        }
-      } else {
-        returnContent = `【穿越结束】虚空裂隙再次出现，将你从异世界拉回。` +
-          `当你睁开眼睛时，发现自己已经回到了熟悉的世界。` +
-          `周围的一切都如你离开时一样，仿佛时间在你离开期间被冻结了。`;
-      }
-
-      const returnMessage = {
-        type: 'system' as const,
-        content: returnContent,
-        time: new Date().toISOString(),
-        actionOptions: ['查看自身状态', '回忆穿越经历', '继续当前活动'],
-      };
-      if (gameStateStore.narrativeHistory) {
-        gameStateStore.narrativeHistory.push(returnMessage);
-      }
-
-      gameStateStore.addToShortTermMemory(
-        `你的联机穿越结束了，已返回自己的世界。` +
-        `原世界在你离开期间处于时间冻结状态，一切如你离开时一样。`
-      );
-
-      await characterStore.saveCurrentGame();
-      await refreshReports();
-      await loadSessionLogs(endedSessionId);
-      activeTab.value = 'logs';
-
-      if (wasEvicted) {
-        if (status.end_reason === 'owner_online') {
-          toast.warning(t('世界主人已上线，你被驱逐出了该世界'));
-        } else {
-          toast.warning(t('你已被驱逐出该世界'));
-        }
-      }
+    if (isTerminalTravelState(status.state)) {
+      await handleTerminalTravelSession(status);
+      return;
     }
+
+    await updateSessionCursor(status);
   } catch (e: any) {
     // 404 意味着会话已不存在
     if (e?.status === 404 || e?.response?.status === 404) {
       const endedSessionId = session.value?.session_id;
-      stopSessionPolling();
-      session.value = null;
-      graph.value = null;
-      await restoreWorldBackup({ persist: true });
-
-      // 添加返回叙事消息
-      const returnMessage = {
-        type: 'system' as const,
-        content: `【穿越结束】虚空裂隙突然消失，你被强制拉回了自己的世界。` +
+      if (endedSessionId) {
+        await handleTerminalTravelSession(
+          { session_id: endedSessionId, state: 'ended', end_reason: 'normal' },
+          {
+            fallbackContent: `【穿越结束】虚空裂隙突然消失，你被强制拉回了自己的世界。` +
           `当你回过神来，发现自己已经回到了熟悉的地方。` +
           `周围的一切都如你离开时一样。`,
-        time: new Date().toISOString(),
-        actionOptions: ['查看自身状态', '继续当前活动'],
-      };
-      if (gameStateStore.narrativeHistory) {
-        gameStateStore.narrativeHistory.push(returnMessage);
+          }
+        );
+      } else {
+        stopSessionPolling();
+        session.value = null;
+        graph.value = null;
+        travelSnapshot.value = null;
+        await restoreWorldBackup({ persist: true });
+        toast.warning(t('穿越会话已结束'));
       }
-
-      gameStateStore.addToShortTermMemory(
-        `你的联机穿越会话已结束，已返回自己的世界。`
-      );
-
-      await characterStore.saveCurrentGame();
-      if (endedSessionId) {
-        await loadSessionLogs(endedSessionId);
-      }
-      activeTab.value = 'logs';
-      toast.warning(t('穿越会话已结束'));
     } else {
       // 🔥 其他错误：更新心跳状态为警告
       heartbeatStatus.value = 'warning';
@@ -1491,6 +1633,7 @@ const handleStartTravelToSelected = async () => {
       gameStateStore.updateState('onlineState', {
         ...(gameStateStore.onlineState || {}),
         穿越目标: {
+          ...((gameStateStore.onlineState as any)?.穿越目标 ?? {}),
           世界ID: session.value.target_world_instance_id,
           离线代理提示词: session.value.owner_offline_agent_prompt || null,
           角色信息: session.value.owner_character_info || null,
