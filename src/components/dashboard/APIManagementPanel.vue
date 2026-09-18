@@ -93,7 +93,7 @@
                     {{ getAPIStatusText(api.id) }}
                   </span>
                 </div>
-                <div class="api-detail" v-if="['openai', 'deepseek', 'zhipu', 'custom', 'gemini', 'claude'].includes(api.provider)">
+                <div class="api-detail" v-if="['openai', 'deepseek', 'zhipu', 'volcengine', 'custom', 'gemini', 'claude'].includes(api.provider)">
                   <label class="json-toggle">
                     <input
                       type="checkbox"
@@ -471,6 +471,7 @@
               <option value="gemini">Gemini</option>
               <option value="deepseek">DeepSeek</option>
               <option value="zhipu">智谱AI</option>
+              <option value="volcengine">火山引擎(豆包)</option>
               <option value="siliconflow-embedding">硅基流动(Embedding)</option>
               <option value="custom">{{ t('自定义(OpenAI兼容)') }}</option>
             </select>
@@ -551,7 +552,7 @@
           <!-- 强制JSON输出选项 -->
           <div
             class="form-group"
-            v-if="['openai', 'deepseek', 'zhipu', 'custom', 'gemini', 'claude'].includes(editingAPI.provider || 'openai')"
+            v-if="['openai', 'deepseek', 'zhipu', 'volcengine', 'custom', 'gemini', 'claude'].includes(editingAPI.provider || 'openai')"
           >
             <label class="checkbox-label">
               <input

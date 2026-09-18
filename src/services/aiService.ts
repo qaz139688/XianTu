@@ -14,7 +14,7 @@ import axios from 'axios';
 import type { APIUsageType, APIConfig as StoreAPIConfig } from '@/stores/apiManagementStore';
 
 // ============ API提供商类型 ============
-export type APIProvider = 'openai' | 'claude' | 'gemini' | 'deepseek' | 'zhipu' | 'siliconflow-embedding' | 'custom';
+export type APIProvider = 'openai' | 'claude' | 'gemini' | 'deepseek' | 'zhipu' | 'volcengine' | 'siliconflow-embedding' | 'custom';
 
 // ============ 配置接口 ============
 export interface AIConfig {
@@ -47,6 +47,7 @@ export const API_PROVIDER_PRESETS: Record<APIProvider, {
   gemini: { url: 'https://generativelanguage.googleapis.com', defaultModel: 'gemini-2.0-flash', name: 'Gemini', defaultMaxTokens: 16000, maxOutputTokens: 65536 },
   deepseek: { url: 'https://api.deepseek.com', defaultModel: 'deepseek-v4-flash', name: 'DeepSeek', defaultMaxTokens: 64000, maxOutputTokens: 384000 },
   zhipu: { url: 'https://open.bigmodel.cn', defaultModel: 'glm-4-flash', name: '智谱AI', defaultMaxTokens: 16000, maxOutputTokens: 128000 },
+  volcengine: { url: 'https://ark.cn-beijing.volces.com', defaultModel: 'doubao-seed-2-1-pro-260628', name: '火山引擎(豆包)', defaultMaxTokens: 16000, maxOutputTokens: 65536 },
   'siliconflow-embedding': { url: 'https://api.siliconflow.cn', defaultModel: 'BAAI/bge-m3', name: '硅基流动(Embedding)' },
   custom: { url: '', defaultModel: '', name: '自定义(OpenAI兼容)', defaultMaxTokens: 16000, maxOutputTokens: 384000 }
 };
@@ -386,11 +387,13 @@ class AIService {
 
         case 'openai':
         case 'deepseek':
+        case 'volcengine':
         case 'custom':
         default: {
-          // OpenAI 兼容 API: GET /v1/models
+          // OpenAI 兼容 API: 不同提供商的 models 端点可能不同
+          const modelsEndpoint = this.getModelsEndpoint(baseUrl, provider);
           try {
-            const response = await axios.get(`${baseUrl}/v1/models`, {
+            const response = await axios.get(modelsEndpoint, {
               headers: { 'Authorization': `Bearer ${apiKey}` },
               signal: this.getAbortSignal(),
               timeout: 10000
@@ -979,19 +982,12 @@ class AIService {
    * 检测 API 是否不支持 response_format 参数
    * 某些中转API（如豆包/Doubao、部分Claude中转）不支持该参数
    */
-  private isResponseFormatUnsupported(url: string, model: string): boolean {
+  private isResponseFormatUnsupported(url: string, model: string, provider?: APIProvider): boolean {
+    // 火山引擎(doubao) API 是 OpenAI 兼容的，支持 response_format
+    if (provider === 'volcengine') return false;
+
     const lowerUrl = (url || '').toLowerCase();
     const lowerModel = (model || '').toLowerCase();
-
-    // 豆包/Doubao API 不支持 response_format
-    if (lowerUrl.includes('doubao') || lowerUrl.includes('volcengine')) {
-      return true;
-    }
-
-    // 火山引擎 API
-    if (lowerUrl.includes('volc') || lowerUrl.includes('bytedance')) {
-      return true;
-    }
 
     // 某些 Claude 中转服务
     if (lowerUrl.includes('anthropic') || lowerModel.includes('claude')) {
@@ -1083,7 +1079,7 @@ class AIService {
     // 🔥 某些模型/API不支持 response_format: json_object
     const isReasonerModel = model.includes('reasoner') || model.includes('r1');
     const isClaudeModel = model.includes('claude');
-    const isUnsupportedAPI = this.isResponseFormatUnsupported(url, model);
+    const isUnsupportedAPI = this.isResponseFormatUnsupported(url, model, provider);
     const shouldSkipResponseFormat = isReasonerModel || isClaudeModel || isUnsupportedAPI;
     const effectiveResponseFormat = (responseFormat && !shouldSkipResponseFormat) ? responseFormat : undefined;
     if (responseFormat && shouldSkipResponseFormat) {
@@ -1118,9 +1114,32 @@ class AIService {
       case 'openai':
       case 'deepseek':
       case 'zhipu':
+      case 'volcengine':
       case 'custom':
       default:
         return this.callOpenAICompatibleAPI(finalMessages, streaming, onStreamChunk, effectiveResponseFormat);
+    }
+  }
+
+  private getChatEndpoint(url: string, provider: APIProvider): string {
+    switch (provider) {
+      case 'zhipu':
+        return `${url}/api/paas/v4/chat/completions`;
+      case 'volcengine':
+        return `${url}/api/v3/chat/completions`;
+      default:
+        return `${url}/v1/chat/completions`;
+    }
+  }
+
+  private getModelsEndpoint(url: string, provider: APIProvider): string {
+    switch (provider) {
+      case 'zhipu':
+        return `${url}/api/paas/v4/models`;
+      case 'volcengine':
+        return `${url}/api/v3/models`;
+      default:
+        return `${url}/v1/models`;
     }
   }
 
@@ -1247,10 +1266,8 @@ class AIService {
     const { provider, url, apiKey, model, temperature, maxTokens } = this.config.customAPI!;
     const safeMaxTokens = this.clampMaxTokensForContext(provider, model, messages, maxTokens || 16000);
 
-    // 智谱AI使用不同的API路径
-    const chatEndpoint = provider === 'zhipu'
-      ? `${url}/api/paas/v4/chat/completions`
-      : `${url}/v1/chat/completions`;
+    // 不同提供商使用不同的API路径
+    const chatEndpoint = this.getChatEndpoint(url, provider);
 
     console.log(`[AI服务-OpenAI兼容] streaming=${streaming}, hasOnStreamChunk=${!!onStreamChunk}`);
 
@@ -1275,7 +1292,7 @@ class AIService {
           // 🔥 注意：某些模型/API不支持 response_format
           const isReasonerModel = model.includes('reasoner') || model.includes('r1');
           const isClaudeModel = model.includes('claude');
-          const isUnsupportedAPI = this.isResponseFormatUnsupported(url, model);
+          const isUnsupportedAPI = this.isResponseFormatUnsupported(url, model, provider);
           if (responseFormat === 'json_object' && !isReasonerModel && !isClaudeModel && !isUnsupportedAPI) {
             requestBody.response_format = { type: 'json_object' };
             console.log('[AI服务-OpenAI兼容] 启用JSON格式输出(降级非流式)');
@@ -1652,10 +1669,8 @@ class AIService {
       console.log(`[AI服务-OpenAI流式] 跳过JSON格式输出（${reason}不支持）`);
     }
 
-    // 智谱AI使用不同的API路径
-    const chatEndpoint = provider === 'zhipu'
-      ? `${url}/api/paas/v4/chat/completions`
-      : `${url}/v1/chat/completions`;
+    // 不同提供商使用不同的API路径
+    const chatEndpoint = this.getChatEndpoint(url, provider ?? 'custom');
 
     const response = await fetch(chatEndpoint, {
       method: 'POST',
